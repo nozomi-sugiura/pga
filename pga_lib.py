@@ -1,6 +1,21 @@
 import numpy as np
 import sig_inv as si
 from scipy.linalg import expm
+def cost_wrapper(args):
+    return cost(*args)
+def cost(tt,vv,g,g0,d,n,npath):
+    cost = 0.0
+    for jp in range(npath):
+        t = tt[jp]
+        dL = defDL(t,vv,g0,d,n,jp)
+        X  = defX(t,vv,g,g0,d,n,jp)
+        dLX = si.prodsig(dL,X,d,n)
+        cost += np.dot(dLX,dLX)
+    cost /= (2.0*npath)
+    cost += np.dot(vv,vv)/2.0
+    if np.isnan(cost):
+        cost = 1e30
+    return cost
 def defX(t,v,g,g0,d,n,jp):
     mew   = defDL(t,v,g0,d,n,jp)
     mew_i = si.invsig(mew,d,n)
@@ -80,6 +95,41 @@ def get_t(t,v1,g,g0,d,n,jp,a0,ntr1,eps1):
         if np.abs(inc*eps1)<1e-2:
             break
     return t
+def nesterov_ls(xk,xkm1,rhokm1,eta,tt,g,g0,npath,cov,d,n,nnp,P,P_i,cov_i,p):
+    rhok = 0.5*(1+np.sqrt(1+4*rhokm1**2))
+    rk   = (rhokm1-1)/rhok
+    xkt  = np.zeros_like(xk)
+    xkp1 = np.zeros_like(xk)
+    c_old = cost(tt,xk,g,g0,d,n,npath)
+    xkt  = xk + rk*(xk-xkm1)
+    gr  = xkt + 0.5*grad_v(tt,xkt,g,g0,npath,d,n,P,P_i)
+    rr = 1.25
+    aa = np.zeros(nnp)
+    for j in range(nnp):
+        aa[j] = eta*rr**j
+    values = [(tt,xkt-aa[j]*gr,g,g0,d,n,npath) for j in range(nnp)]
+    result = p.map(cost_wrapper,values)
+    c = np.array(result)
+    ind = c.argsort()
+    print("#cost",*c[ind[:3]])
+    aa_opt = aa[ind[0]]
+    if c_old < c[ind[0]]:
+        xkp1 = xk.copy()
+    else:
+        xkp1 = xkt - aa_opt*gr
+    norm0 = si.quadratic_norm(gr,d,n)
+    absx0  = si.homogenous_norm(xk,d,n)
+    absx1  = si.homogenous_norm(xkp1,d,n)
+    lmda = np.sqrt(absx0/absx1)
+    xkp1 = si.dilation(xkp1,lmda,n,d)
+    absx1  = si.homogenous_norm(xkp1,d,n)
+    c = cost(tt,xkp1,g,g0,d,n,npath)
+    if ind[0]== 0:
+        eta /= rr
+    elif ind[0] == nnp-1:
+        eta *= rr
+    print("#outer", norm0, absx1, c, ind[0])
+    return xkp1, rhok, eta
 def nesterov_p(xk,xkm1,rhokm1,eta,tt,g,g0,npath,cov,d,n,nnp,P,P_i,cov_i):
     rhok = 0.5*(1+np.sqrt(1+4*rhokm1**2))
     rk   = (rhokm1-1)/rhok
@@ -96,8 +146,29 @@ def nesterov_p(xk,xkm1,rhokm1,eta,tt,g,g0,npath,cov,d,n,nnp,P,P_i,cov_i):
     lmda = np.sqrt(absx0/absx1)
     xkp1 = si.dilation(xkp1,lmda,n,d)
     absx1  = si.homogenous_norm(xkp1,d,n)
-    print("#outer", norm0, absx1 )
+    c = cost(tt,xkp1,g,g0,d,n,npath)
+    print("#outer", norm0, absx1, c)
     return xkp1, rhok, eta
+def adagrad(xk,h,eta,tt,g,g0,npath,cov,d,n,nnp,P,P_i,cov_i):
+    sigdim = g.shape[0]
+    gr  = grad_v(tt,xk,g,g0,npath,d,n,P,P_i)
+    for i1 in range(sigdim):
+      h[i1]  += gr[i1]*gr[i1]
+    hsqrt = np.zeros(sigdim)  
+    hsqrt = (h+1e-10)**(-0.5)
+    inc = np.zeros(sigdim)
+    inc = eta * hsqrt * gr
+    inc = P @ P_i @ inc
+    xkp1 = xk - inc
+    norm0 = si.quadratic_norm(gr,d,n)
+    absx0  = si.homogenous_norm(xk,d,n)
+    absx1  = si.homogenous_norm(xkp1,d,n)
+    lmda = np.sqrt(absx0/absx1)
+    xkp1 = si.dilation(xkp1,lmda,n,d)
+    absx1  = si.homogenous_norm(xkp1,d,n)
+    c = cost(tt,xkp1,g,g0,d,n,npath)
+    print("#outer", norm0, absx1, c)
+    return xkp1, h
 def grad_v(tt,v1,g,g0,npath,d,n,P,P_i):
     sigdim = (d**(n+1)-1)//(d-1)
     bb = np.zeros(sigdim)
